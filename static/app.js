@@ -1,18 +1,25 @@
 // LocalMeetingSum — frontend
+// All audio capture happens in the browser via getUserMedia / getDisplayMedia.
+// PCM is streamed to the server as WebSocket binary frames; the server runs
+// STT and pushes back transcript events as JSON text frames.
 (() => {
 'use strict';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+const TARGET_SR = 16000;
+const EMIT_MS = 100;          // per-frame chunk size sent over WS
+const FRAME_VERSION = 1;
+
 const state = {
   ws: null,
   utterances: [],
   partialsBySource: {},
-  devices: [],          // all WASAPI devices from /api/devices
-  sources: new Map(),   // key -> { dev, label, level, lastLevelTs }
+  sources: new Map(),         // id -> { kind, label, stream, ctx, node, level, lastLevelTs }
   liveActive: false,
-  mode: null,
+  nextId: 1,
+  permissionAsked: false,
 };
 
 // ============== Tabs ==============
@@ -23,54 +30,61 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
   $(`[data-pane="${t.dataset.tab}"]`).classList.remove('hidden');
 }));
 
-// ============== Status helper ==============
+// ============== Status ==============
 function setStatus(text, cls = '') {
   const s = $('#status');
   s.textContent = text;
   s.className = cls;
 }
 
-// ============== WebSocket ==============
+// ============== WebSocket (control + binary PCM) ==============
 function connect() {
   return new Promise((resolve, reject) => {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) return resolve();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.binaryType = 'arraybuffer';
     ws.onopen = () => { state.ws = ws; resolve(); };
     ws.onerror = (e) => reject(e);
     ws.onclose = () => {
       state.ws = null;
       setStatus('disconnected', '');
-      // Clear all source levels on disconnect.
-      for (const s of state.sources.values()) s.level = 0;
     };
     ws.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      handleEvent(msg);
+      if (typeof ev.data === 'string') {
+        try { handleEvent(JSON.parse(ev.data)); } catch {}
+      }
     };
   });
 }
 
-function send(obj) {
+function sendCtrl(obj) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify(obj));
   }
 }
 
+// Binary frame: [u8 version=1][u8 id_len][id bytes][float32 LE PCM ...]
+function sendPCM(sourceId, float32) {
+  const ws = state.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const idBytes = new TextEncoder().encode(sourceId);
+  if (idBytes.length > 255) return;
+  const buf = new ArrayBuffer(2 + idBytes.length + float32.byteLength);
+  const dv = new DataView(buf);
+  dv.setUint8(0, FRAME_VERSION);
+  dv.setUint8(1, idBytes.length);
+  new Uint8Array(buf, 2, idBytes.length).set(idBytes);
+  new Uint8Array(buf, 2 + idBytes.length).set(new Uint8Array(float32.buffer));
+  ws.send(buf);
+}
+
 // ============== Event handler ==============
 function handleEvent(msg) {
   switch (msg.type) {
-    case 'source_added':
-      // backend ack — nothing to do
+    case 'source_opened':
+    case 'source_closed':
       break;
-    case 'source_removed':
-      break;
-    case 'level': {
-      const s = state.sources.get(msg.source);
-      if (s) { s.level = msg.level; s.lastLevelTs = performance.now(); }
-      break;
-    }
     case 'live_started':
       state.liveActive = true;
       setStatus(`live (${msg.sources.length} src)`, 'live');
@@ -95,9 +109,8 @@ function handleEvent(msg) {
       renderPartials();
       break;
     case 'progress':
-      const pct = msg.percent || 0;
-      $('#file-progress').value = pct;
-      setStatus(`${msg.stage} ${pct}%`, 'busy');
+      $('#file-progress').value = msg.percent || 0;
+      setStatus(`${msg.stage} ${msg.percent || 0}%`, 'busy');
       break;
     case 'done':
       setStatus('done');
@@ -106,99 +119,240 @@ function handleEvent(msg) {
       break;
     case 'error':
       console.error('server error', msg);
-      setStatus('error: ' + msg.message, '');
+      setStatus('err: ' + msg.message, '');
       break;
   }
 }
 
-// ============== Device & source management ==============
-async function loadDevices() {
+// ============== Add-source UI ==============
+async function ensureMicPermission() {
+  // Triggering getUserMedia once unlocks device labels in enumerateDevices.
+  if (state.permissionAsked) return;
   try {
-    const r = await fetch('/api/devices');
-    const j = await r.json();
-    state.devices = j.devices || [];
+    const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+    probe.getTracks().forEach(t => t.stop());
+    state.permissionAsked = true;
   } catch (e) {
-    setStatus('设备加载失败: ' + e, '');
-    state.devices = [];
+    // User denied — labels will be empty but we let them try anyway.
   }
 }
 
-function refreshDeviceDropdown() {
-  const kind = document.querySelector('input[name="new-kind"]:checked')?.value || 'input';
+async function refreshMicDropdown() {
   const sel = $('#new-device');
   sel.innerHTML = '';
-  const avail = state.devices.filter(d => d.kind === kind && !state.sources.has(d.key));
-  if (avail.length === 0) {
-    const opt = document.createElement('option');
-    opt.textContent = '(没有可用设备)';
-    opt.disabled = true;
-    sel.append(opt);
+  let devices = [];
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (e) {
+    sel.append(opt('(无法枚举设备)', '', true));
+    return;
+  }
+  const mics = devices.filter(d => d.kind === 'audioinput');
+  if (mics.length === 0) {
+    sel.append(opt('(没有麦克风设备)', '', true));
     $('#btn-confirm-add').disabled = true;
     return;
   }
-  $('#btn-confirm-add').disabled = false;
-  for (const d of avail) {
-    const opt = document.createElement('option');
-    opt.value = d.key;
-    opt.textContent = d.name + `  (${d.default_samplerate}Hz·${d.channels}ch)`;
-    sel.append(opt);
+  if (!mics[0].label) {
+    // Permission not granted yet — show "授权后显示设备名" placeholder
+    sel.append(opt('点击"添加"后浏览器会请求麦克风权限', '', true));
   }
+  for (const d of mics) {
+    sel.append(opt(d.label || `麦克风 ${d.deviceId.slice(0,6)}`, d.deviceId));
+  }
+  $('#btn-confirm-add').disabled = false;
 }
 
-function autoLabel(dev) {
-  let n = dev.name.split('(')[0].trim();
-  if (n.length > 14) n = n.slice(0, 14);
-  return dev.kind === 'loopback' ? n + ':sys' : n;
+function opt(text, value, disabled = false) {
+  const o = document.createElement('option');
+  o.textContent = text;
+  o.value = value;
+  if (disabled) o.disabled = true;
+  return o;
 }
 
-async function addSourceFromForm() {
-  const sel = $('#new-device');
-  const key = sel.value;
-  if (!key) return;
-  const dev = state.devices.find(d => d.key === key);
-  if (!dev || state.sources.has(key)) return;
-  await connect();
-  const label = autoLabel(dev);
-  state.sources.set(key, { dev, label, level: 0, lastLevelTs: 0 });
-  send({ cmd: 'add_source', key, label });
-  renderSources();
+function showScreenAvailability() {
+  // Only Chromium desktop browsers support getDisplayMedia with system audio.
+  const canScreen = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  $('#kind-screen-label').style.opacity = canScreen ? '' : '0.4';
+  $('#kind-screen-label').title = canScreen ? '' : '此浏览器不支持屏幕音频(常见于手机)';
+}
+
+$('#btn-show-add').addEventListener('click', async () => {
+  showScreenAvailability();
+  await ensureMicPermission();
+  await refreshMicDropdown();
+  $('#add-source-form').classList.remove('hidden');
+  $('#btn-show-add').classList.add('hidden');
+});
+$('#btn-cancel-add').addEventListener('click', () => {
   $('#add-source-form').classList.add('hidden');
   $('#btn-show-add').classList.remove('hidden');
-  $('#btn-start-live').disabled = state.liveActive || state.sources.size === 0;
-}
+});
+$$('input[name="new-kind"]').forEach(el => el.addEventListener('change', () => {
+  const kind = document.querySelector('input[name="new-kind"]:checked').value;
+  $('#new-device').style.display = (kind === 'mic') ? '' : 'none';
+}));
 
-function removeSource(key) {
-  state.sources.delete(key);
-  send({ cmd: 'remove_source', key });
-  renderSources();
-  if (state.sources.size === 0 && !state.liveActive) {
-    $('#btn-start-live').disabled = true;
+// ============== Add / remove source ==============
+async function addSource() {
+  const kind = document.querySelector('input[name="new-kind"]:checked').value;
+  let stream;
+  let displayName;
+  try {
+    if (kind === 'mic') {
+      const deviceId = $('#new-device').value;
+      if (!deviceId) { alert('请选择一个麦克风'); return; }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: { exact: deviceId },
+          echoCancellation: true,
+          noiseSuppression: false,
+          autoGainControl: false,
+        }
+      });
+      const opt = $('#new-device').options[$('#new-device').selectedIndex];
+      displayName = (opt && opt.textContent) || '麦克风';
+    } else {
+      // Screen audio (Chrome desktop only)
+      const full = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+      const audio = full.getAudioTracks();
+      if (audio.length === 0) {
+        full.getTracks().forEach(t => t.stop());
+        alert('未捕获到系统音频。请在分享对话框里勾选"分享系统声音"。');
+        return;
+      }
+      // Discard video track to save bandwidth/cpu.
+      full.getVideoTracks().forEach(t => t.stop());
+      stream = new MediaStream(audio);
+      displayName = '屏幕音频';
+    }
+  } catch (e) {
+    if (e.name === 'NotAllowedError') alert('权限被拒绝');
+    else alert('采集失败: ' + e.message);
+    return;
   }
+
+  const id = `s${state.nextId++}`;
+  const label = autoLabel(kind, displayName);
+
+  // Build audio graph: source → worklet → (no output, we don't want to hear ourselves)
+  const ctx = new AudioContext({ sampleRate: TARGET_SR, latencyHint: 'interactive' });
+  try {
+    await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
+  } catch (e) {
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+    alert('AudioWorklet 不可用,需要现代浏览器');
+    return;
+  }
+  const src = ctx.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(ctx, 'pcm-worklet', {
+    processorOptions: { emitMs: EMIT_MS },
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    channelCount: 1,
+    channelCountMode: 'explicit',
+    channelInterpretation: 'speakers',
+  });
+  src.connect(node);
+  // node.connect(ctx.destination);  // intentionally NOT connected — no monitoring
+
+  const entry = { id, kind, label, stream, ctx, src, node, level: 0, lastLevelTs: 0, displayName };
+  state.sources.set(id, entry);
+
+  node.port.onmessage = (e) => {
+    const pcm = e.data.pcm;
+    const sr = e.data.sr || ctx.sampleRate;
+    const out = sr === TARGET_SR ? pcm : resampleTo16k(pcm, sr);
+    // Update level meter (peak amplitude).
+    let peak = 0;
+    for (let i = 0; i < out.length; i++) {
+      const a = out[i] < 0 ? -out[i] : out[i];
+      if (a > peak) peak = a;
+    }
+    entry.level = peak;
+    entry.lastLevelTs = performance.now();
+    // Send to server (server drops if STT not yet enabled).
+    sendPCM(id, out);
+  };
+
+  // If the user revokes permission or unplugs the device, MediaStreamTrack 'ended' fires.
+  stream.getAudioTracks()[0].addEventListener('ended', () => removeSource(id));
+
+  await connect();
+  sendCtrl({ cmd: 'open_source', id, label, sample_rate: TARGET_SR });
+
+  $('#add-source-form').classList.add('hidden');
+  $('#btn-show-add').classList.remove('hidden');
+  $('#btn-start-live').disabled = state.liveActive;
+  renderSources();
 }
 
+function autoLabel(kind, name) {
+  let n = (name || '').split('(')[0].trim();
+  if (n.length > 14) n = n.slice(0, 14);
+  if (!n) n = kind === 'screen' ? 'Screen' : 'Mic';
+  return n + (kind === 'screen' ? ':sys' : '');
+}
+
+function removeSource(id) {
+  const s = state.sources.get(id);
+  if (!s) return;
+  try { s.stream.getTracks().forEach(t => t.stop()); } catch {}
+  try { s.src.disconnect(); } catch {}
+  try { s.node.disconnect(); } catch {}
+  try { s.ctx.close(); } catch {}
+  state.sources.delete(id);
+  sendCtrl({ cmd: 'close_source', id });
+  renderSources();
+  if (state.sources.size === 0) $('#btn-start-live').disabled = true;
+}
+
+// ============== Simple linear resampler (for AudioContext sr != 16k fallback) ==============
+function resampleTo16k(pcm, srcSr) {
+  if (srcSr === TARGET_SR) return pcm;
+  const ratio = TARGET_SR / srcSr;
+  const n = Math.round(pcm.length * ratio);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / ratio;
+    const i0 = Math.floor(t);
+    const i1 = Math.min(i0 + 1, pcm.length - 1);
+    const f = t - i0;
+    out[i] = pcm[i0] * (1 - f) + pcm[i1] * f;
+  }
+  return out;
+}
+
+// ============== Source rendering + level animation ==============
 function renderSources() {
   const root = $('#sources-list');
   root.innerHTML = '';
-  for (const [key, s] of state.sources) {
+  for (const [id, s] of state.sources) {
     const row = document.createElement('div');
     row.className = 'source-row';
-    row.dataset.key = key;
+    row.dataset.id = id;
 
     const badge = document.createElement('span');
-    badge.className = 'kind-badge ' + s.dev.kind;
-    badge.textContent = s.dev.kind === 'input' ? '麦克风' : '系统输出';
+    badge.className = 'kind-badge ' + (s.kind === 'mic' ? 'input' : 'loopback');
+    badge.textContent = s.kind === 'mic' ? '麦克风' : '屏幕音频';
     const name = document.createElement('span');
     name.className = 'src-name';
-    name.title = s.dev.name;
-    name.textContent = s.dev.name;
-    const label = document.createElement('input');
-    label.type = 'text';
-    label.className = 'src-label';
-    label.value = s.label;
-    label.placeholder = '标签';
-    label.addEventListener('change', () => {
-      s.label = label.value.trim() || s.label;
-      send({ cmd: 'relabel', key, label: s.label });
+    name.title = s.displayName;
+    name.textContent = s.displayName;
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.className = 'src-label';
+    labelInput.value = s.label;
+    labelInput.placeholder = '标签';
+    labelInput.addEventListener('change', () => {
+      s.label = labelInput.value.trim() || s.label;
+      sendCtrl({ cmd: 'relabel', id, label: s.label });
     });
 
     const meter = document.createElement('div');
@@ -214,59 +368,22 @@ function renderSources() {
     rm.type = 'button';
     rm.title = '移除';
     rm.textContent = '×';
-    rm.addEventListener('click', () => removeSource(key));
+    rm.addEventListener('click', () => removeSource(id));
 
-    row.append(badge, name, label, meter, rm);
+    row.append(badge, name, labelInput, meter, rm);
     root.append(row);
   }
 }
 
-// ============== Add-source form controls ==============
-$('#btn-show-add').addEventListener('click', async () => {
-  await loadDevices();
-  refreshDeviceDropdown();
-  $('#add-source-form').classList.remove('hidden');
-  $('#btn-show-add').classList.add('hidden');
-});
-$('#btn-cancel-add').addEventListener('click', () => {
-  $('#add-source-form').classList.add('hidden');
-  $('#btn-show-add').classList.remove('hidden');
-});
-$('#btn-confirm-add').addEventListener('click', addSourceFromForm);
-$$('input[name="new-kind"]').forEach(el => el.addEventListener('change', refreshDeviceDropdown));
-
-// ============== Live capture ==============
-$('#btn-start-live').addEventListener('click', async () => {
-  if (state.sources.size === 0) { alert('请先添加至少一个音源'); return; }
-  state.utterances = [];
-  state.partialsBySource = {};
-  state.mode = 'live';
-  renderTranscript();
-  renderPartials();
-  $('#panel-merge').classList.add('hidden');
-  $('#panel-summary').classList.add('hidden');
-  await connect();
-  send({ cmd: 'start_live' });
-});
-
-$('#btn-stop-live').addEventListener('click', () => {
-  send({ cmd: 'stop_live' });
-  $('#btn-start-live').disabled = state.sources.size === 0;
-  $('#btn-stop-live').disabled = true;
-});
-
-// ============== Level meter animation ==============
 function tickMeters() {
   const now = performance.now();
-  for (const [key, s] of state.sources) {
-    const row = document.querySelector(`.source-row[data-key="${CSS.escape(key)}"]`);
+  for (const [id, s] of state.sources) {
+    const row = document.querySelector(`.source-row[data-id="${CSS.escape(id)}"]`);
     if (!row) continue;
     const fill = row.querySelector('.meter-fill');
-    // Decay if no level event for a while.
     const age = now - (s.lastLevelTs || 0);
     let level = s.level || 0;
     if (age > 150) level = level * Math.max(0, 1 - (age - 150) / 800);
-    // Linear amplitude → dBFS → percentage (-60..0 dB).
     const db = 20 * Math.log10(Math.max(level, 1e-6));
     const pct = Math.max(0, Math.min(100, (db + 60) * 100 / 60));
     fill.style.width = pct + '%';
@@ -277,22 +394,40 @@ function tickMeters() {
 }
 requestAnimationFrame(tickMeters);
 
+// ============== Confirm-add button wiring ==============
+$('#btn-confirm-add').addEventListener('click', addSource);
+
+// ============== Live start / stop ==============
+$('#btn-start-live').addEventListener('click', async () => {
+  if (state.sources.size === 0) { alert('请先添加至少一个音源'); return; }
+  state.utterances = [];
+  state.partialsBySource = {};
+  renderTranscript();
+  renderPartials();
+  $('#panel-merge').classList.add('hidden');
+  $('#panel-summary').classList.add('hidden');
+  await connect();
+  sendCtrl({ cmd: 'start_live' });
+});
+$('#btn-stop-live').addEventListener('click', () => {
+  sendCtrl({ cmd: 'stop_live' });
+  $('#btn-start-live').disabled = state.sources.size === 0;
+  $('#btn-stop-live').disabled = true;
+});
+
 // ============== File upload ==============
 $('#file-input').addEventListener('change', () => {
   $('#btn-process-file').disabled = !$('#file-input').files[0];
 });
-
 $('#btn-process-file').addEventListener('click', async () => {
   const f = $('#file-input').files[0];
   if (!f) return;
   state.utterances = [];
   state.partialsBySource = {};
-  state.mode = 'file';
   renderTranscript();
   renderPartials();
   $('#panel-merge').classList.add('hidden');
   $('#panel-summary').classList.add('hidden');
-
   setStatus('uploading…', 'busy');
   $('#file-progress').style.display = 'block';
   $('#file-progress').value = 0;
@@ -308,10 +443,10 @@ $('#btn-process-file').addEventListener('click', async () => {
   }
   await connect();
   const label = $('#file-label').value.trim() || 'File';
-  send({ cmd: 'process_file', session_id: sid, label });
+  sendCtrl({ cmd: 'process_file', session_id: sid, label });
 });
 
-// ============== Rendering ==============
+// ============== Rendering: partials, transcript ==============
 function renderPartials() {
   const root = $('#partials');
   root.innerHTML = '';
@@ -330,7 +465,6 @@ function renderPartials() {
     root.append(row);
   }
 }
-
 function renderTranscript() {
   const root = $('#transcript');
   root.innerHTML = '';
@@ -352,14 +486,13 @@ function renderTranscript() {
   }
   root.scrollTop = root.scrollHeight;
 }
-
 function fmtMs(ms) {
   if (!ms) return '0:00';
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// ============== Merge / relabel ==============
+// ============== Merge / summary ==============
 function showMergePanel() {
   const speakers = [...new Set(state.utterances.map(u => u.speaker))].sort();
   if (speakers.length === 0) return;
@@ -384,7 +517,6 @@ function showMergePanel() {
   $('#panel-merge').classList.remove('hidden');
   $('#panel-merge').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-
 $('#btn-skip-merge').addEventListener('click', () => runSummary({}));
 $('#btn-apply-merge').addEventListener('click', () => {
   const mapping = {};
@@ -394,7 +526,6 @@ $('#btn-apply-merge').addEventListener('click', () => {
   }
   runSummary(mapping);
 });
-
 async function runSummary(mapping) {
   setStatus('summarizing…', 'busy');
   if (Object.keys(mapping).length) {
@@ -419,7 +550,6 @@ async function runSummary(mapping) {
     setStatus('summary error: ' + e, '');
   }
 }
-
 function renderSummary(s) {
   const root = $('#summary');
   root.innerHTML = '';
@@ -472,5 +602,5 @@ function renderSummary(s) {
 }
 
 // ============== Init ==============
-loadDevices();
+showScreenAvailability();
 })();

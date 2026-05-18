@@ -16,11 +16,6 @@ python-multipart>=0.0.9
 python-dotenv>=1.0
 openai>=1.40
 
-# sounddevice does NOT support WASAPI loopback on Windows (its bundled PortAudio
-# lacks the loopback symbols). PyAudioWPatch is a maintained PyAudio fork built
-# specifically with loopback enabled — it exposes "System (Elgato Wave:3) [Loopback]"
-# style devices as ordinary inputs, no flag dance required.
-pyaudiowpatch>=0.2.12.7
 soundfile>=0.12.1
 scipy>=1.13
 

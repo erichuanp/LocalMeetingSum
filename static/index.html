@@ -22,7 +22,11 @@
     </div>
 
     <div class="tab-pane" data-pane="live">
-      <p class="muted">每个音源独立做 STT;不同音源绝不会被并成同一个人。加号添加,绿条实时反映该源音量。</p>
+      <p class="muted">
+        每个音源独立做 STT;不同音源绝不会被并成同一个人。<br>
+        音频采集在<strong>本设备</strong>(打开网页的这台,不论手机/Mac/Windows),STT 和 LLM 在服务器 GPU 上。
+        手机/平板只能拿到麦克风;桌面 Chrome 可以选"屏幕音频"拿到系统播放声。
+      </p>
 
       <div id="sources-list" class="sources-list"></div>
 
@@ -32,18 +36,19 @@
         <div id="add-source-form" class="add-source-form hidden">
           <div class="kind-toggle">
             <label class="kind-radio">
-              <input type="radio" name="new-kind" value="input" checked>
+              <input type="radio" name="new-kind" value="mic" checked>
               <span>麦克风</span>
             </label>
-            <label class="kind-radio">
-              <input type="radio" name="new-kind" value="loopback">
-              <span>系统输出</span>
+            <label class="kind-radio" id="kind-screen-label">
+              <input type="radio" name="new-kind" value="screen">
+              <span>屏幕音频(系统声音)</span>
             </label>
           </div>
           <select id="new-device" class="device-select"></select>
           <button id="btn-confirm-add" class="btn-primary" type="button">添加</button>
           <button id="btn-cancel-add" class="btn-secondary" type="button">×</button>
         </div>
+        <p class="muted" id="hint-screen">提示:"屏幕音频"需要在共享对话框里勾选"分享系统声音"。仅 Chromium 桌面浏览器支持。</p>
       </div>
 
       <div class="row">
