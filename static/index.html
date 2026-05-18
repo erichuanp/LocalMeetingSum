@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>LocalMeetingSum</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <h1>LocalMeetingSum</h1>
+  <span id="status" class="muted">idle</span>
+</header>
+
+<main>
+  <section class="panel" id="panel-input">
+    <h2>1. 输入</h2>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="live">实时录音</button>
+      <button class="tab" data-tab="file">上传文件</button>
+    </div>
+
+    <div class="tab-pane" data-pane="live">
+      <p class="muted">每个音源独立做 STT;不同音源绝不会被并成同一个人。加号添加,绿条实时反映该源音量。</p>
+
+      <div id="sources-list" class="sources-list"></div>
+
+      <div id="add-source-area" class="add-source-area">
+        <button id="btn-show-add" class="btn-add" type="button">+ 添加音源</button>
+
+        <div id="add-source-form" class="add-source-form hidden">
+          <div class="kind-toggle">
+            <label class="kind-radio">
+              <input type="radio" name="new-kind" value="input" checked>
+              <span>麦克风</span>
+            </label>
+            <label class="kind-radio">
+              <input type="radio" name="new-kind" value="loopback">
+              <span>系统输出</span>
+            </label>
+          </div>
+          <select id="new-device" class="device-select"></select>
+          <button id="btn-confirm-add" class="btn-primary" type="button">添加</button>
+          <button id="btn-cancel-add" class="btn-secondary" type="button">×</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="btn-start-live" class="btn-primary" disabled>▶ 开始录音转写</button>
+        <button id="btn-stop-live" class="btn-secondary" disabled>■ 停止</button>
+      </div>
+    </div>
+
+    <div class="tab-pane hidden" data-pane="file">
+      <p class="muted">支持 mp4 / mov / mkv / m4a / mp3 / wav / flac / opus / webm / 3gp / aac 等所有 ffmpeg 能解码的格式(iOS/Android 通用)。</p>
+      <input type="file" id="file-input" accept="audio/*,video/*" />
+      <div class="row">
+        <input type="text" id="file-label" placeholder="标签(可选,默认 'File')" />
+        <button id="btn-process-file" class="btn-primary" disabled>▶ 转写文件</button>
+      </div>
+      <progress id="file-progress" max="100" value="0" style="width:100%;display:none"></progress>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-transcript">
+    <h2>2. 转写结果</h2>
+    <div id="partials" class="partials"></div>
+    <div id="transcript" class="transcript"></div>
+  </section>
+
+  <section class="panel hidden" id="panel-merge">
+    <h2>3. 校正发言人</h2>
+    <p class="muted">
+      模型识别出以下发言人。如果你觉得几个标签其实是同一个人(模型分得太细),
+      把它们映射到同一个名字即可;留空或保留原名表示不变。
+    </p>
+    <div id="merge-list"></div>
+    <div class="row">
+      <button id="btn-apply-merge" class="btn-primary">应用并生成总结</button>
+      <button id="btn-skip-merge" class="btn-secondary">跳过(直接总结)</button>
+    </div>
+  </section>
+
+  <section class="panel hidden" id="panel-summary">
+    <h2>4. 总结</h2>
+    <div id="summary"></div>
+    <details>
+      <summary class="muted">查看原始 JSON</summary>
+      <pre id="summary-json"></pre>
+    </details>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

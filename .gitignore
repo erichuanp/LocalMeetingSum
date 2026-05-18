@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+
+# Virtual envs
+venv/
+env/
+.venv/
+.conda/
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+uploads/
+*.log
+/tmp/
+
+# Test scratches
+_smoke_*.py
+_probe_*.py
+_test_*.json
+_test_*.py
+
+# Model cache (lives in user home but defensive)
+.cache/
+modelscope_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# Claude session state
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build / dist artifacts (in case we ever package)
+build/
+dist/
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst

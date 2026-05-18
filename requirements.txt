@@ -1,0 +1,27 @@
+# PyTorch with CUDA 12.8 wheels — required for sm_120 (Blackwell, RTX 50-series).
+# Older cu124/cu126 wheels do NOT include sm_120 kernels and will silently fail
+# at inference on a 5080/5090.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch>=2.11.0
+torchaudio>=2.11.0
+
+funasr>=1.1.14
+modelscope>=1.18.0
+numpy<2
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+python-dotenv>=1.0
+openai>=1.40
+
+# sounddevice does NOT support WASAPI loopback on Windows (its bundled PortAudio
+# lacks the loopback symbols). PyAudioWPatch is a maintained PyAudio fork built
+# specifically with loopback enabled — it exposes "System (Elgato Wave:3) [Loopback]"
+# style devices as ordinary inputs, no flag dance required.
+pyaudiowpatch>=0.2.12.7
+soundfile>=0.12.1
+scipy>=1.13
+
+websockets>=12
