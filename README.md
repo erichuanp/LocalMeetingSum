@@ -83,35 +83,39 @@ python server.py
 
 ## 开机自启 + 局域网开放
 
+两个脚本选一个用,都在 `scripts/` 下。
+
+### 方案 A:NSSM 真服务(推荐 —— 不用登录就起)
+
 ```powershell
-# 在管理员 PowerShell 里跑一次,把服务设成"用户登录后自动起",并开放防火墙端口 788
+choco install nssm   # 一次,安装 NSSM
+.\scripts\install_service.ps1
+```
+
+注册成一个标准的 Windows 服务,默认 `LocalSystem` 账号:开机即起,不依赖登录,崩溃自动重启,`services.msc` 可见,日志在 `logs/service.{out,err}.log`(10MB 轮转)。
+
+```powershell
+.\scripts\install_service.ps1 -RunAsUser    # 用你自己的账号跑(会提示输密码,NSSM DPAPI 存)
+.\scripts\install_service.ps1 -Uninstall    # 卸载
+```
+
+常用:`nssm restart LocalMeetingSum` / `nssm edit LocalMeetingSum`(GUI 改配置)/ `Get-Service LocalMeetingSum`。
+
+### 方案 B:计划任务(免装 NSSM,但要登录)
+
+```powershell
 .\scripts\install_autostart.ps1
 ```
 
-它会:
-
-1. 注册一个名为 `LocalMeetingSum` 的计划任务,你登录 Windows 后自动起;崩溃自动重启 5 次
-2. 在 Windows 防火墙开放 788/tcp 入站(域 + 专用网络;不开放 Public profile)
-
-需要无登录的真"开机启动"(比如远程接入前):
+注册名为 `LocalMeetingSum` 的计划任务,**你登录 Windows 后**自动起;崩溃自动重启 5 次。比 NSSM 简单,但需要你登录后才会起。
 
 ```powershell
-.\scripts\install_autostart.ps1 -AtStartup
-```
-
-卸载:
-
-```powershell
+.\scripts\install_autostart.ps1 -AtStartup    # 改成开机即起(需要存凭据)
 .\scripts\install_autostart.ps1 -Uninstall
-```
-
-查看 / 操作任务:
-
-```powershell
 Get-ScheduledTask -TaskName LocalMeetingSum | Get-ScheduledTaskInfo
-Start-ScheduledTask -TaskName LocalMeetingSum    # 立即起一次
-Stop-ScheduledTask  -TaskName LocalMeetingSum
 ```
+
+两个脚本都会顺便把防火墙 788/tcp 入站规则开起来(域 + 专用网络,不放 Public)。
 
 ## HTTPS(手机访问麦克风必备)
 
@@ -210,8 +214,9 @@ LocalMeetingSum/
 │   ├── pcm-worklet.js   # AudioWorklet 切 100ms 帧
 │   └── style.css
 ├── scripts/
-│   ├── install_autostart.ps1     # 注册计划任务 + 防火墙
-│   └── make_self_signed_cert.ps1 # 生成自签证书
+│   ├── install_service.ps1       # NSSM 注册真服务(推荐)
+│   ├── install_autostart.ps1     # 计划任务版(免装 NSSM 但要登录)
+│   └── make_self_signed_cert.ps1 # 生成自签证书(用 openssl)
 ├── requirements.txt
 └── .env.example
 ```
