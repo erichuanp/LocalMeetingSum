@@ -14,12 +14,13 @@ import os
 import queue
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, Body, HTTPException
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, Body, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -76,6 +77,102 @@ async def api_upload(file: UploadFile = File(...)):
                 break
             f.write(chunk)
     return {"session_id": sid, "filename": file.filename, "path": str(target)}
+
+
+def _strip_source_prefix(speaker: str) -> str:
+    """'File-A' -> 'A',  'X-AB' -> 'AB'. process_file() emits '<label>-<letter>'."""
+    return speaker.rsplit("-", 1)[-1] if speaker else speaker
+
+
+def _fmt_hms(ms: int) -> str:
+    """123_456 ms -> '0:02:03'."""
+    s = max(0, int(ms)) // 1000
+    return f"{s // 3600}:{(s // 60) % 60:02d}:{s % 60:02d}"
+
+
+def _to_markdown(utterances: list[dict]) -> str:
+    """Render utterances as the format the user specified:
+           **发言人：A  0:12:24**
+           你好你好，我是发言人A。
+
+           **发言人：B  0:12:27**
+           ...
+    """
+    lines: list[str] = []
+    for u in sorted(utterances, key=lambda x: x.get("start_ms", 0)):
+        spk = u.get("speaker") or "?"
+        ts = _fmt_hms(u.get("start_ms", 0))
+        text = (u.get("text") or "").strip()
+        if not text:
+            continue
+        lines.append(f"**发言人：{spk}  {ts}**")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@app.post("/api/transcribe")
+def api_transcribe(payload: Optional[dict] = Body(None),
+                   path: Optional[str] = Query(None)):
+    """Transcribe an audio/video file ALREADY ON THE SERVER's filesystem.
+
+    Writes the Markdown next to the input file:
+        <input_dir>/<YYYYMMDDHHMMSS>+<original_filename>.md
+
+    Body or query supports the file path:
+        curl -X POST 'http://localhost:788/api/transcribe?path=C:/x/meeting.mp4'
+        curl -X POST http://localhost:788/api/transcribe \\
+             -H 'Content-Type: application/json' \\
+             -d '{"path":"C:/x/meeting.mp4"}'
+
+    No upload — the path is read by the server directly. Intended for LAN use.
+    """
+    raw_path = path or ((payload or {}).get("path"))
+    if not raw_path:
+        raise HTTPException(400, "missing 'path' (query string or JSON body)")
+    src = Path(raw_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"file not found: {src}")
+    if not src.is_file():
+        raise HTTPException(400, f"not a file: {src}")
+
+    # 1. Decode
+    try:
+        pcm = audio_decode.decode_to_pcm16k_mono(src)
+    except Exception as e:
+        raise HTTPException(500, f"decode failed: {e}")
+    if pcm.size == 0:
+        raise HTTPException(400, "no audio in file")
+    duration_ms = int(pcm.size * 1000 / 16000)
+
+    # 2. STT (offline + diarization). Use a benign label so we can strip it later.
+    try:
+        utts = stt.process_file(pcm, source_label="X")
+    except Exception as e:
+        raise HTTPException(500, f"stt failed: {e}")
+
+    # 3. Strip prefix → plain A, B, C, ...
+    for u in utts:
+        u["speaker"] = _strip_source_prefix(u.get("speaker", "?"))
+
+    # 4. Write markdown next to the input file.
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    md_name = f"{ts}+{src.name}.md"
+    md_path = src.parent / md_name
+    try:
+        md_path.write_text(_to_markdown(utts), encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(500, f"write failed ({md_path}): {e}")
+
+    speakers = sorted({u["speaker"] for u in utts})
+    return {
+        "ok": True,
+        "input": str(src),
+        "md_path": str(md_path),
+        "speakers": speakers,
+        "utterances": len(utts),
+        "duration_ms": duration_ms,
+    }
 
 
 @app.post("/api/summarize")

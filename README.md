@@ -188,6 +188,45 @@ tailscale funnel --bg --https=443 http://localhost:788
 }
 ```
 
+## 命令行 / 脚本调用(REST API)
+
+不想开网页?直接拿绝对路径喂给 `/api/transcribe`,转写完会在**同目录下**写一个 `<时间戳>+<原文件名>.md`(发言人按 A / B / C / … 标,每句带时间戳)。
+
+```bash
+# 查询参数风格
+curl -X POST 'http://localhost:788/api/transcribe?path=C:/data/meeting.mp4'
+
+# JSON body 风格
+curl -X POST http://localhost:788/api/transcribe \
+     -H 'Content-Type: application/json' \
+     -d '{"path":"C:/data/meeting.mp4"}'
+```
+
+返回:
+
+```json
+{
+  "ok": true,
+  "input":    "C:/data/meeting.mp4",
+  "md_path":  "C:/data/20260520101522+meeting.mp4.md",
+  "speakers": ["A", "B"],
+  "utterances": 18,
+  "duration_ms": 156000
+}
+```
+
+生成的 Markdown:
+
+```markdown
+**发言人：A  0:00:00**
+你好你好，我是发言人A。
+
+**发言人：B  0:00:03**
+你好你好，我是发言人B你好啊。
+```
+
+**注意**:这个 API 直接读服务端文件系统(不走 upload),仅供 LAN 内部使用。文件路径在 GPU 机器上必须能直接读到。
+
 ## 调优(.env)
 
 | 变量 | 默认 | 说明 |
